@@ -1,0 +1,94 @@
+
+# This is a basic workflow to help you get started with Actions
+
+name: Push Message on Google PubSub
+
+# Controls when the workflow will run
+on:
+#   # Triggers the workflow on push or pull request events but only for the "main" branch
+  push:
+    branches: [ "main" ]
+    paths-ignore:
+      - '.github/workflows/**'
+
+env:
+  IMAGE_NAME: ${{ github.actor }}/go-server
+  DOCKERFILE_PATH: ./Dockerfile
+  REGISTRY: ghcr.io
+
+jobs:
+  build-project:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.getDigest.outputs.docker_digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+      
+      - name: Build Docker Image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ${{ env.DOCKERFILE_PATH }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+              
+      - name: Print Git PubSub information
+        run: |
+          echo "Git PubSub Information:"
+          echo "${{ toJson(github.event) }}"
+          echo ${{ github.sha }}  
+      - name: Get image digest
+        id: getDigest
+        run: |
+          IMAGE_TAG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $IMAGE_TAG | awk -F@ '{print $2}')
+          echo "Digest: $DIGEST"
+          echo "docker_digest=$DIGEST" >> $GITHUB_OUTPUT
+
+      
+      - name: Print Digest
+        run: |
+          echo "Image Digest: ${{ steps.getDigest.outputs.IMAGE_DIGEST }}"
+          
+  push-to-pubsub:
+    needs: build-project
+    runs-on: ubuntu-latest
+      
+    steps: 
+      - name: Clone deployment repository
+        uses: actions/checkout@v3
+        with:
+          repository: dcrack2021/google-pubsub
+          ref: master
+          token: ${{ secrets.REPO_TOKEN }}
+      
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.20.4
+          
+      - name: "Get the Docker SHA from the environment variable"
+        run: |
+          echo  ${{ needs.build-project.outputs.digest }}
+      - name: RUN
+        env: 
+          TOPICMESSAGE_DIGEST: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build-project.outputs.digest }}
+          TOPICMESSAGE_TAG: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+          GOOGLECLIENTAUTHFILE: application_default_credentials.json
+          PROJECTID: infra-337510
+          TOPICID: github-actions
+          
+        run: |
+          echo "$GOOGLE_CREDENTIALS" > application_default_credentials.json
+          go run main.go
